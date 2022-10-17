@@ -44,7 +44,12 @@ class FlameModPage : public ModPage {
     Q_OBJECT
 
    public:
-    explicit FlameModPage(ModDownloadDialog* dialog, BaseInstance* instance);
+    static FlameModPage* create(ModDownloadDialog* dialog, BaseInstance* instance)
+    {
+        return ModPage::create<FlameModPage>(dialog, instance);
+    }
+
+    FlameModPage(ModDownloadDialog* dialog, BaseInstance* instance);
     ~FlameModPage() override = default;
 
     inline auto displayName() const -> QString override { return "CurseForge"; }
@@ -56,6 +61,7 @@ class FlameModPage : public ModPage {
     inline auto metaEntryBase() const -> QString override { return "FlameMods"; };
 
     auto validateVersion(ModPlatform::IndexedVersion& ver, QString mineVer, ModAPI::ModLoaderTypes loaders = ModAPI::Unspecified) const -> bool override;
+    bool optedOut(ModPlatform::IndexedVersion& ver) const override;
 
     auto shouldDisplay() const -> bool override;
 };

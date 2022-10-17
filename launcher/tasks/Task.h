@@ -35,9 +35,11 @@
 
 #pragma once
 
+#include <QRunnable>
+
 #include "QObjectPtr.h"
 
-class Task : public QObject {
+class Task : public QObject, public QRunnable {
     Q_OBJECT
    public:
     using Ptr = shared_qobject_ptr<Task>;
@@ -45,7 +47,7 @@ class Task : public QObject {
     enum class State { Inactive, Running, Succeeded, Failed, AbortedByUser };
 
    public:
-    explicit Task(QObject* parent = 0);
+    explicit Task(QObject* parent = 0, bool show_debug_log = true);
     virtual ~Task() = default;
 
     bool isRunning() const;
@@ -66,7 +68,7 @@ class Task : public QObject {
 
     virtual QStringList warnings() const;
 
-    virtual bool canAbort() const { return false; }
+    virtual bool canAbort() const { return m_can_abort; }
 
     auto getState() const -> State { return m_state; }
 
@@ -94,9 +96,18 @@ class Task : public QObject {
     void status(QString status);
     void stepStatus(QString status);
 
+    /** Emitted when the canAbort() status has changed.
+     */
+    void abortStatusChanged(bool can_abort);
+
    public slots:
+    // QRunnable's interface
+    void run() override { start(); }
+
     virtual void start();
     virtual bool abort() { if(canAbort()) emitAborted(); return canAbort(); };
+
+    void setAbortable(bool can_abort) { m_can_abort = can_abort; emit abortStatusChanged(can_abort); }
 
    protected:
     virtual void executeTask() = 0;
@@ -117,4 +128,11 @@ class Task : public QObject {
     QString m_status;
     int m_progress = 0;
     int m_progressTotal = 100;
+
+    // TODO: Nuke in favor of QLoggingCategory
+    bool m_show_debug = true;
+
+   private:
+    // Change using setAbortStatus
+    bool m_can_abort = false;
 };

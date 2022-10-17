@@ -33,9 +33,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_STANDARD 11)
 include(GenerateExportHeader)
 set(CMAKE_CXX_FLAGS "-Wall -pedantic -fstack-protector-strong --param=ssp-buffer-size=4 ${CMAKE_CXX_FLAGS}")
-if(UNIX AND APPLE)
-    set(CMAKE_CXX_FLAGS "-stdlib=libc++ ${CMAKE_CXX_FLAGS}")
-endif()
 
 # Fix build with Qt 5.13
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DQT_NO_DEPRECATED_WARNINGS=Y")
@@ -67,7 +64,7 @@ find_package(ECM REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH "${ECM_MODULE_PATH};${CMAKE_MODULE_PATH}")
 include(CTest)
 include(ECMAddTests)
-if (BUILD_TESTING)
+if(BUILD_TESTING)
     enable_testing()
 endif()
 
@@ -192,6 +189,14 @@ if (Qt5_POSITION_INDEPENDENT_CODE)
     SET(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
+if(NOT Launcher_FORCE_BUNDLED_LIBS)
+    # Find toml++
+    find_package(tomlplusplus 3.2.0 QUIET)
+
+    # Find ghc_filesystem
+    find_package(ghc_filesystem QUIET)
+endif()
+
 ####################################### Program Info #######################################
 
 set(Launcher_APP_BINARY_NAME "polymc" CACHE STRING "Name of the Launcher binary")
@@ -300,7 +305,6 @@ add_subdirectory(libraries/systeminfo) # system information library
 add_subdirectory(libraries/hoedown) # markdown parser
 add_subdirectory(libraries/launcher) # java based launcher part for Minecraft
 add_subdirectory(libraries/javacheck) # java compatibility checker
-add_subdirectory(libraries/xz-embedded) # xz compression
 if (FORCE_BUNDLED_QUAZIP)
     message(STATUS "Using bundled QuaZip")
     set(BUILD_SHARED_LIBS 0)  # link statically to avoid conflicts.
@@ -311,15 +315,30 @@ else()
 endif()
 add_subdirectory(libraries/rainbow) # Qt extension for colors
 add_subdirectory(libraries/LocalPeer) # fork of a library from Qt solutions
-add_subdirectory(libraries/classparser) # class parser library
-add_subdirectory(libraries/tomlc99) # toml parser
+if(NOT tomlplusplus_FOUND)
+    message(STATUS "Using bundled tomlplusplus")
+    add_subdirectory(libraries/tomlplusplus) # toml parser
+else()
+    message(STATUS "Using system tomlplusplus")
+endif()
 add_subdirectory(libraries/katabasis) # An OAuth2 library that tried to do too much
 add_subdirectory(libraries/gamemode)
 add_subdirectory(libraries/murmur2) # Hash for usage with the CurseForge API
+if (NOT ghc_filesystem_FOUND)
+    message(STATUS "Using bundled ghc_filesystem")
+    set(GHC_FILESYSTEM_WITH_INSTALL OFF) # Workaround ghc::filesystem bug
+    add_subdirectory(libraries/filesystem) # Implementation of std::filesystem for old C++, for usage in old macOS
+    add_library(ghcFilesystem::ghc_filesystem ALIAS ghc_filesystem)
+else()
+    message(STATUS "Using system ghc_filesystem")
+endif()
 
 ############################### Built Artifacts ###############################
 
 add_subdirectory(buildconfig)
 
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
 # NOTE: this must always be last to appease the CMake deity of quirky install command evaluation order.
 add_subdirectory(launcher)

@@ -37,6 +37,7 @@
 
 #include <QDebug>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
@@ -56,6 +57,41 @@
 #include <string>
 #else
 #include <utime.h>
+#endif
+
+// Snippet from https://github.com/gulrak/filesystem#using-it-as-single-file-header
+
+#ifdef __APPLE__
+#include <Availability.h> // for deployment target to support pre-catalina targets without std::fs
+#endif // __APPLE__
+
+#if ((defined(_MSVC_LANG) && _MSVC_LANG >= 201703L) || (defined(__cplusplus) && __cplusplus >= 201703L)) && defined(__has_include)
+#if __has_include(<filesystem>) && (!defined(__MAC_OS_X_VERSION_MIN_REQUIRED) || __MAC_OS_X_VERSION_MIN_REQUIRED >= 101500)
+#define GHC_USE_STD_FS
+#include <filesystem>
+namespace fs = std::filesystem;
+#endif // MacOS min version check
+#endif // Other OSes version check
+
+#ifndef GHC_USE_STD_FS
+#include <ghc/filesystem.hpp>
+namespace fs = ghc::filesystem;
+#endif
+
+#if defined Q_OS_WIN32
+
+std::wstring toStdString(QString s)
+{
+    return s.toStdWString();
+}
+
+#else
+
+std::string toStdString(QString s)
+{
+    return s.toStdString();
+}
+
 #endif
 
 namespace FS {
@@ -128,6 +164,8 @@ bool ensureFolderPathExists(QString foldernamepath)
 
 bool copy::operator()(const QString& offset)
 {
+    using copy_opts = fs::copy_options;
+
 // NOTE always deep copy on windows. the alternatives are too messy.
 #if defined Q_OS_WIN32
     m_followSymlinks = true;
@@ -136,94 +174,53 @@ bool copy::operator()(const QString& offset)
     auto src = PathCombine(m_src.absolutePath(), offset);
     auto dst = PathCombine(m_dst.absolutePath(), offset);
 
-    QFileInfo currentSrc(src);
-    if (!currentSrc.exists())
-        return false;
+    std::error_code err;
 
-    if (!m_followSymlinks && currentSrc.isSymLink()) {
-        qDebug() << "creating symlink" << src << " - " << dst;
-        if (!ensureFilePathExists(dst)) {
-            qWarning() << "Cannot create path!";
-            return false;
+    fs::copy_options opt = copy_opts::none;
+
+    // The default behavior is to follow symlinks
+    if (!m_followSymlinks)
+        opt |= copy_opts::copy_symlinks;
+
+
+    // We can't use copy_opts::recursive because we need to take into account the
+    // blacklisted paths, so we iterate over the source directory, and if there's no blacklist
+    // match, we copy the file.
+    QDir src_dir(src);
+    QDirIterator source_it(src, QDir::Filter::Files, QDirIterator::Subdirectories);
+
+    while (source_it.hasNext()) {
+        auto src_path = source_it.next();
+        auto relative_path = src_dir.relativeFilePath(src_path);
+
+        if (m_blacklist && m_blacklist->matches(relative_path))
+            continue;
+
+        auto dst_path = PathCombine(dst, relative_path);
+        ensureFilePathExists(dst_path);
+
+        fs::copy(toStdString(src_path), toStdString(dst_path), opt, err);
+        if (err) {
+            qWarning() << "Failed to copy files:" << QString::fromStdString(err.message());
+            qDebug() << "Source file:" << src_path;
+            qDebug() << "Destination file:" << dst_path;
         }
-        return QFile::link(currentSrc.symLinkTarget(), dst);
-    } else if (currentSrc.isFile()) {
-        qDebug() << "copying file" << src << " - " << dst;
-        if (!ensureFilePathExists(dst)) {
-            qWarning() << "Cannot create path!";
-            return false;
-        }
-        return QFile::copy(src, dst);
-    } else if (currentSrc.isDir()) {
-        qDebug() << "recursing" << offset;
-        if (!ensureFolderPathExists(dst)) {
-            qWarning() << "Cannot create path!";
-            return false;
-        }
-        QDir currentDir(src);
-        for (auto& f : currentDir.entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System)) {
-            auto inner_offset = PathCombine(offset, f);
-            // ignore and skip stuff that matches the blacklist.
-            if (m_blacklist && m_blacklist->matches(inner_offset)) {
-                continue;
-            }
-            if (!operator()(inner_offset)) {
-                qWarning() << "Failed to copy" << inner_offset;
-                return false;
-            }
-        }
-    } else {
-        qCritical() << "Copy ERROR: Unknown filesystem object:" << src;
-        return false;
     }
-    return true;
+
+    return err.value() == 0;
 }
 
 bool deletePath(QString path)
 {
-    bool OK = true;
-    QFileInfo finfo(path);
-    if (finfo.isFile()) {
-        return QFile::remove(path);
+    std::error_code err;
+
+    fs::remove_all(toStdString(path), err);
+
+    if (err) {
+        qWarning() << "Failed to remove files:" << QString::fromStdString(err.message());
     }
 
-    QDir dir(path);
-
-    if (!dir.exists()) {
-        return OK;
-    }
-    auto allEntries = dir.entryInfoList(QDir::NoDotAndDotDot | QDir::System | QDir::Hidden | QDir::AllDirs | QDir::Files, QDir::DirsFirst);
-
-    for (auto& info : allEntries) {
-#if defined Q_OS_WIN32
-        QString nativePath = QDir::toNativeSeparators(info.absoluteFilePath());
-        auto wString = nativePath.toStdWString();
-        DWORD dwAttrs = GetFileAttributesW(wString.c_str());
-        // Windows: check for junctions, reparse points and other nasty things of that sort
-        if (dwAttrs & FILE_ATTRIBUTE_REPARSE_POINT) {
-            if (info.isFile()) {
-                OK &= QFile::remove(info.absoluteFilePath());
-            } else if (info.isDir()) {
-                OK &= dir.rmdir(info.absoluteFilePath());
-            }
-        }
-#else
-        // We do not trust Qt with reparse points, but do trust it with unix symlinks.
-        if (info.isSymLink()) {
-            OK &= QFile::remove(info.absoluteFilePath());
-        }
-#endif
-        else if (info.isDir()) {
-            OK &= deletePath(info.absoluteFilePath());
-        } else if (info.isFile()) {
-            OK &= QFile::remove(info.absoluteFilePath());
-        } else {
-            OK = false;
-            qCritical() << "Delete ERROR: Unknown filesystem object:" << info.absoluteFilePath();
-        }
-    }
-    OK &= dir.rmdir(dir.absolutePath());
-    return OK;
+    return err.value() == 0;
 }
 
 bool trash(QString path, QString *pathInTrash = nullptr)
@@ -316,8 +313,7 @@ QString DirNameFromString(QString string, QString inDir)
         if (num == 0) {
             dirName = baseName;
         } else {
-            dirName = baseName + QString::number(num);
-            ;
+            dirName = baseName + "(" + QString::number(num) + ")";
         }
 
         // If it's over 9000
@@ -335,50 +331,6 @@ bool checkProblemticPathJava(QDir folder)
     QString pathfoldername = folder.absolutePath();
     return pathfoldername.contains("!", Qt::CaseInsensitive);
 }
-
-// Win32 crap
-#ifdef Q_OS_WIN
-
-bool called_coinit = false;
-
-HRESULT CreateLink(LPCCH linkPath, LPCWSTR targetPath, LPCWSTR args)
-{
-    HRESULT hres;
-
-    if (!called_coinit) {
-        hres = CoInitialize(NULL);
-        called_coinit = true;
-
-        if (!SUCCEEDED(hres)) {
-            qWarning("Failed to initialize COM. Error 0x%08lX", hres);
-            return hres;
-        }
-    }
-
-    IShellLink* link;
-    hres = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_IShellLink, (LPVOID*)&link);
-
-    if (SUCCEEDED(hres)) {
-        IPersistFile* persistFile;
-
-        link->SetPath(targetPath);
-        link->SetArguments(args);
-
-        hres = link->QueryInterface(IID_IPersistFile, (LPVOID*)&persistFile);
-        if (SUCCEEDED(hres)) {
-            WCHAR wstr[MAX_PATH];
-
-            MultiByteToWideChar(CP_ACP, 0, linkPath, -1, wstr, MAX_PATH);
-
-            hres = persistFile->Save(wstr, TRUE);
-            persistFile->Release();
-        }
-        link->Release();
-    }
-    return hres;
-}
-
-#endif
 
 QString getDesktopDir()
 {
@@ -439,46 +391,24 @@ bool createShortCut(QString location, QString dest, QStringList args, QString na
 #endif
 }
 
-QStringList listFolderPaths(QDir root)
-{
-    auto createAbsPath = [](QFileInfo const& entry) { return FS::PathCombine(entry.path(), entry.fileName()); };
-
-    QStringList entries;
-
-    root.refresh();
-    for (auto entry : root.entryInfoList(QDir::Filter::Files)) {
-        entries.append(createAbsPath(entry));
-    }
-
-    for (auto entry : root.entryInfoList(QDir::Filter::AllDirs | QDir::Filter::NoDotAndDotDot)) {
-        entries.append(listFolderPaths(createAbsPath(entry)));
-    }
-
-    return entries;
-}
-
 bool overrideFolder(QString overwritten_path, QString override_path)
 {
+    using copy_opts = fs::copy_options;
+
     if (!FS::ensureFolderPathExists(overwritten_path))
         return false;
 
-    QStringList paths_to_override;
-    QDir root_override (override_path);
-    for (auto file : listFolderPaths(root_override)) {
-        QString destination = file;
-        destination.replace(override_path, overwritten_path);
+    std::error_code err;
+    fs::copy_options opt = copy_opts::recursive | copy_opts::overwrite_existing;
 
-        qDebug() << QString("Applying override %1 in %2").arg(file, destination);
+    fs::copy(toStdString(override_path), toStdString(overwritten_path), opt, err);
 
-        if (QFile::exists(destination))
-            QFile::remove(destination);
-        if (!QFile::rename(file, destination)) {
-            qCritical() << QString("Failed to apply override from %1 to %2").arg(file, destination);
-            return false;
-        }
+    if (err) {
+        qCritical() << QString("Failed to apply override from %1 to %2").arg(override_path, overwritten_path);
+        qCritical() << "Reason:" << QString::fromStdString(err.message());
     }
 
-    return true;
+    return err.value() == 0;
 }
 
 }

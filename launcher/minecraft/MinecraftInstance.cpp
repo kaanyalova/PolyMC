@@ -76,6 +76,7 @@
 
 #include "mod/ModFolderModel.h"
 #include "mod/ResourcePackFolderModel.h"
+#include "mod/ShaderPackFolderModel.h"
 #include "mod/TexturePackFolderModel.h"
 
 #include "WorldList.h"
@@ -146,6 +147,7 @@ void MinecraftInstance::loadSpecificSettings()
         m_settings->registerPassthrough(global_settings->getSetting("JavaTimestamp"), javaOrLocation);
         m_settings->registerPassthrough(global_settings->getSetting("JavaVersion"), javaOrLocation);
         m_settings->registerPassthrough(global_settings->getSetting("JavaArchitecture"), javaOrLocation);
+        m_settings->registerPassthrough(global_settings->getSetting("JavaRealArchitecture"), javaOrLocation);
 
         // Window Size
         auto windowSetting = m_settings->registerSetting("OverrideWindow", false);
@@ -189,6 +191,13 @@ void MinecraftInstance::loadSpecificSettings()
     qDebug() << "Instance-type specific settings were loaded!";
 
     setSpecificSettingsLoaded(true);
+
+    updateRuntimeContext();
+}
+
+void MinecraftInstance::updateRuntimeContext()
+{
+    m_runtimeContext.updateFromInstanceSettings(m_settings);
 }
 
 QString MinecraftInstance::typeName() const
@@ -242,6 +251,14 @@ QString MinecraftInstance::getLocalLibraryPath() const
 {
     QDir libraries_dir(FS::PathCombine(instanceRoot(), "libraries/"));
     return libraries_dir.absolutePath();
+}
+
+bool MinecraftInstance::supportsDemo() const
+{
+    Version instance_ver { getPackProfile()->getComponentVersion("net.minecraft") };
+    // Demo mode was introduced in 1.3.1: https://minecraft.fandom.com/wiki/Demo_mode#History
+    // FIXME: Due to Version constraints atm, this can't handle well non-release versions
+    return instance_ver >= Version("1.3.1");
 }
 
 QString MinecraftInstance::jarModsDir() const
@@ -318,9 +335,8 @@ QDir MinecraftInstance::versionsPath() const
 QStringList MinecraftInstance::getClassPath()
 {
     QStringList jars, nativeJars;
-    auto javaArchitecture = settings()->get("JavaArchitecture").toString();
     auto profile = m_components->getProfile();
-    profile->getLibraryFiles(javaArchitecture, jars, nativeJars, getLocalLibraryPath(), binRoot());
+    profile->getLibraryFiles(runtimeContext(), jars, nativeJars, getLocalLibraryPath(), binRoot());
     return jars;
 }
 
@@ -333,9 +349,8 @@ QString MinecraftInstance::getMainClass() const
 QStringList MinecraftInstance::getNativeJars()
 {
     QStringList jars, nativeJars;
-    auto javaArchitecture = settings()->get("JavaArchitecture").toString();
     auto profile = m_components->getProfile();
-    profile->getLibraryFiles(javaArchitecture, jars, nativeJars, getLocalLibraryPath(), binRoot());
+    profile->getLibraryFiles(runtimeContext(), jars, nativeJars, getLocalLibraryPath(), binRoot());
     return nativeJars;
 }
 
@@ -359,7 +374,7 @@ QStringList MinecraftInstance::extraArguments()
     for (auto agent : agents)
     {
         QStringList jar, temp1, temp2, temp3;
-        agent->library()->getApplicableFiles(currentSystem, jar, temp1, temp2, temp3, getLocalLibraryPath());
+        agent->library()->getApplicableFiles(runtimeContext(), jar, temp1, temp2, temp3, getLocalLibraryPath());
         list.append("-javaagent:"+jar[0]+(agent->argument().isEmpty() ? "" : "="+agent->argument()));
     }
     return list;
@@ -454,13 +469,11 @@ QProcessEnvironment MinecraftInstance::createLaunchEnvironment()
     QProcessEnvironment env = createEnvironment();
 
 #ifdef Q_OS_LINUX
-    if (settings()->get("EnableMangoHud").toBool())
+    if (settings()->get("EnableMangoHud").toBool() && APPLICATION->capabilities() & Application::SupportsMangoHud)
     {
         auto preload = env.value("LD_PRELOAD", "") + ":libMangoHud_dlsym.so:libMangoHud.so";
-        auto lib_path = env.value("LD_LIBRARY_PATH", "") +  ":/usr/local/$LIB/mangohud/:/usr/$LIB/mangohud/";
 
         env.insert("LD_PRELOAD", preload);
-        env.insert("LD_LIBRARY_PATH", lib_path);
         env.insert("MANGOHUD", "1");
     }
 
@@ -618,8 +631,7 @@ QString MinecraftInstance::createLaunchScript(AuthSessionPtr session, MinecraftS
     // libraries and class path.
     {
         QStringList jars, nativeJars;
-        auto javaArchitecture = settings()->get("JavaArchitecture").toString();
-        profile->getLibraryFiles(javaArchitecture, jars, nativeJars, getLocalLibraryPath(), binRoot());
+        profile->getLibraryFiles(runtimeContext(), jars, nativeJars, getLocalLibraryPath(), binRoot());
         for(auto file: jars)
         {
             launchScript += "cp " + file + "\n";
@@ -675,8 +687,7 @@ QStringList MinecraftInstance::verboseDescription(AuthSessionPtr session, Minecr
     {
         out << "Libraries:";
         QStringList jars, nativeJars;
-        auto javaArchitecture = settings->get("JavaArchitecture").toString();
-        profile->getLibraryFiles(javaArchitecture, jars, nativeJars, getLocalLibraryPath(), binRoot());
+        profile->getLibraryFiles(runtimeContext(), jars, nativeJars, getLocalLibraryPath(), binRoot());
         auto printLibFile = [&](const QString & path)
         {
             QFileInfo info(path);
@@ -707,14 +718,14 @@ QStringList MinecraftInstance::verboseDescription(AuthSessionPtr session, Minecr
         {
             out << QString("%1:").arg(label);
             auto modList = model.allMods();
-            std::sort(modList.begin(), modList.end(), [](Mod::Ptr a, Mod::Ptr b) {
+            std::sort(modList.begin(), modList.end(), [](auto a, auto b) {
                 auto aName = a->fileinfo().completeBaseName();
                 auto bName = b->fileinfo().completeBaseName();
                 return aName.localeAwareCompare(bName) < 0;
             });
             for(auto mod: modList)
             {
-                if(mod->type() == Mod::MOD_FOLDER)
+                if(mod->type() == ResourceType::FOLDER)
                 {
                     out << u8"  [🖿] " + mod->fileinfo().completeBaseName() + " (folder)";
                     continue;
@@ -741,8 +752,8 @@ QStringList MinecraftInstance::verboseDescription(AuthSessionPtr session, Minecr
         out << "Jar Mods:";
         for(auto & jarmod: jarMods)
         {
-            auto displayname = jarmod->displayName(currentSystem);
-            auto realname = jarmod->filename(currentSystem);
+            auto displayname = jarmod->displayName(runtimeContext());
+            auto realname = jarmod->filename(runtimeContext());
             if(displayname != realname)
             {
                 out << "  " + displayname + " (" + realname + ")";
@@ -904,6 +915,7 @@ QString MinecraftInstance::getStatusbarDescription()
 
 Task::Ptr MinecraftInstance::createUpdateTask(Net::Mode mode)
 {
+    updateRuntimeContext();
     switch (mode)
     {
         case Net::Mode::Offline:
@@ -920,6 +932,7 @@ Task::Ptr MinecraftInstance::createUpdateTask(Net::Mode mode)
 
 shared_qobject_ptr<LaunchTask> MinecraftInstance::createLaunchTask(AuthSessionPtr session, MinecraftServerTargetPtr serverToJoin)
 {
+    updateRuntimeContext();
     // FIXME: get rid of shared_from_this ...
     auto process = LaunchTask::create(std::dynamic_pointer_cast<MinecraftInstance>(shared_from_this()));
     auto pptr = process.get();
@@ -1092,18 +1105,18 @@ std::shared_ptr<ModFolderModel> MinecraftInstance::coreModList() const
     return m_core_mod_list;
 }
 
-std::shared_ptr<ModFolderModel> MinecraftInstance::resourcePackList() const
+std::shared_ptr<ResourcePackFolderModel> MinecraftInstance::resourcePackList() const
 {
     if (!m_resource_pack_list)
     {
         m_resource_pack_list.reset(new ResourcePackFolderModel(resourcePacksDir()));
-        m_resource_pack_list->disableInteraction(isRunning());
-        connect(this, &BaseInstance::runningStatusChanged, m_resource_pack_list.get(), &ModFolderModel::disableInteraction);
+        m_resource_pack_list->enableInteraction(!isRunning());
+        connect(this, &BaseInstance::runningStatusChanged, m_resource_pack_list.get(), &ResourcePackFolderModel::disableInteraction);
     }
     return m_resource_pack_list;
 }
 
-std::shared_ptr<ModFolderModel> MinecraftInstance::texturePackList() const
+std::shared_ptr<TexturePackFolderModel> MinecraftInstance::texturePackList() const
 {
     if (!m_texture_pack_list)
     {
@@ -1114,11 +1127,11 @@ std::shared_ptr<ModFolderModel> MinecraftInstance::texturePackList() const
     return m_texture_pack_list;
 }
 
-std::shared_ptr<ModFolderModel> MinecraftInstance::shaderPackList() const
+std::shared_ptr<ShaderPackFolderModel> MinecraftInstance::shaderPackList() const
 {
     if (!m_shader_pack_list)
     {
-        m_shader_pack_list.reset(new ResourcePackFolderModel(shaderPacksDir()));
+        m_shader_pack_list.reset(new ShaderPackFolderModel(shaderPacksDir()));
         m_shader_pack_list->disableInteraction(isRunning());
         connect(this, &BaseInstance::runningStatusChanged, m_shader_pack_list.get(), &ModFolderModel::disableInteraction);
     }
@@ -1150,7 +1163,7 @@ QList<Mod*> MinecraftInstance::getJarMods() const
     for (auto jarmod : profile->getJarMods())
     {
         QStringList jar, temp1, temp2, temp3;
-        jarmod->getApplicableFiles(currentSystem, jar, temp1, temp2, temp3, jarmodsPath().absolutePath());
+        jarmod->getApplicableFiles(runtimeContext(), jar, temp1, temp2, temp3, jarmodsPath().absolutePath());
         // QString filePath = jarmodsPath().absoluteFilePath(jarmod->filename(currentSystem));
         mods.push_back(new Mod(QFileInfo(jar[0])));
     }

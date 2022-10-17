@@ -93,8 +93,8 @@ void LaunchController::decideAccount()
         auto reply = CustomMessageBox::selectable(
             m_parentWidget,
             tr("No Accounts"),
-            tr("In order to play Minecraft, you must have at least one Mojang or Microsoft "
-               "account logged in. "
+            tr("In order to play Minecraft, you must have at least one Microsoft or Mojang "
+               "account logged in. Mojang accounts can only be used offline. "
                "Would you like to open the account manager to add an account now?"),
             QMessageBox::Information,
             QMessageBox::Yes | QMessageBox::No
@@ -167,6 +167,7 @@ void LaunchController::login() {
         tries++;
         m_session = std::make_shared<AuthSession>();
         m_session->wants_online = m_online;
+        m_session->demo = m_demo;
         m_accountToUse->fillSession(m_session);
 
         // Launch immediately in true offline mode
@@ -184,12 +185,18 @@ void LaunchController::login() {
                 if(!m_session->wants_online) {
                     // we ask the user for a player name
                     bool ok = false;
+
+                    QString message = tr("Choose your offline mode player name.");
+                    if(m_session->demo) {
+                        message = tr("Choose your demo mode player name.");
+                    }
+
                     QString lastOfflinePlayerName = APPLICATION->settings()->get("LastOfflinePlayerName").toString();
                     QString usedname = lastOfflinePlayerName.isEmpty() ? m_session->player_name : lastOfflinePlayerName;
                     QString name = QInputDialog::getText(
                         m_parentWidget,
                         tr("Player name"),
-                        tr("Choose your offline mode player name."),
+                        message,
                         QLineEdit::Normal,
                         usedname,
                         &ok
@@ -369,7 +376,7 @@ void LaunchController::launchInstance()
         }
         m_launcher->prependStep(new TextPrint(m_launcher.get(), resolved_servers, MessageLevel::Launcher));
     } else {
-        online_mode = "offline";
+        online_mode = m_demo ? "demo" : "offline";
     }
 
     m_launcher->prependStep(new TextPrint(m_launcher.get(), "Launched instance in " + online_mode + " mode\n", MessageLevel::Launcher));

@@ -1,3 +1,38 @@
+// SPDX-License-Identifier: GPL-3.0-only
+/*
+ *  PolyMC - Minecraft Launcher
+ *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
+ *
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation, version 3.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * This file incorporates work covered by the following copyright and
+ * permission notice:
+ *
+ *      Copyright 2013-2021 MultiMC Contributors
+ *
+ *      Licensed under the Apache License, Version 2.0 (the "License");
+ *      you may not use this file except in compliance with the License.
+ *      You may obtain a copy of the License at
+ *
+ *          http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *      Unless required by applicable law or agreed to in writing, software
+ *      distributed under the License is distributed on an "AS IS" BASIS,
+ *      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *      See the License for the specific language governing permissions and
+ *      limitations under the License.
+ */
+
 #pragma once
 #include "BaseInstance.h"
 #include <java/JavaVersion.h>
@@ -7,6 +42,10 @@
 #include "minecraft/launch/MinecraftServerTarget.h"
 
 class ModFolderModel;
+class ResourceFolderModel;
+class ResourcePackFolderModel;
+class ShaderPackFolderModel;
+class TexturePackFolderModel;
 class WorldList;
 class GameOptions;
 class LaunchStep;
@@ -65,6 +104,10 @@ public:
     // where the instance-local libraries should be
     QString getLocalLibraryPath() const;
 
+    /** Returns whether the instance, with its version, has support for demo mode. */
+    [[nodiscard]] bool supportsDemo() const;
+
+    void updateRuntimeContext();
 
     //////  Profile management //////
     std::shared_ptr<PackProfile> getPackProfile() const;
@@ -72,9 +115,9 @@ public:
     //////  Mod Lists  //////
     std::shared_ptr<ModFolderModel> loaderModList() const;
     std::shared_ptr<ModFolderModel> coreModList() const;
-    std::shared_ptr<ModFolderModel> resourcePackList() const;
-    std::shared_ptr<ModFolderModel> texturePackList() const;
-    std::shared_ptr<ModFolderModel> shaderPackList() const;
+    std::shared_ptr<ResourcePackFolderModel> resourcePackList() const;
+    std::shared_ptr<TexturePackFolderModel> texturePackList() const;
+    std::shared_ptr<ShaderPackFolderModel> shaderPackList() const;
     std::shared_ptr<WorldList> worldList() const;
     std::shared_ptr<GameOptions> gameOptionsModel() const;
 
@@ -125,9 +168,9 @@ protected: // data
     std::shared_ptr<PackProfile> m_components;
     mutable std::shared_ptr<ModFolderModel> m_loader_mod_list;
     mutable std::shared_ptr<ModFolderModel> m_core_mod_list;
-    mutable std::shared_ptr<ModFolderModel> m_resource_pack_list;
-    mutable std::shared_ptr<ModFolderModel> m_shader_pack_list;
-    mutable std::shared_ptr<ModFolderModel> m_texture_pack_list;
+    mutable std::shared_ptr<ResourcePackFolderModel> m_resource_pack_list;
+    mutable std::shared_ptr<ShaderPackFolderModel> m_shader_pack_list;
+    mutable std::shared_ptr<TexturePackFolderModel> m_texture_pack_list;
     mutable std::shared_ptr<WorldList> m_world_list;
     mutable std::shared_ptr<GameOptions> m_game_options;
 };

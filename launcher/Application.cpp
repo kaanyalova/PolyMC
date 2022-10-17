@@ -60,6 +60,10 @@
 #include "ui/themes/BrightTheme.h"
 #include "ui/themes/CustomTheme.h"
 
+#ifdef Q_OS_WIN
+#include "ui/WinDarkmode.h"
+#endif
+
 #include "ui/setupwizard/SetupWizard.h"
 #include "ui/setupwizard/LanguageWizardPage.h"
 #include "ui/setupwizard/JavaWizardPage.h"
@@ -74,6 +78,7 @@
 #include <iostream>
 
 #include <QAccessible>
+#include <QCommandLineParser>
 #include <QDir>
 #include <QFileInfo>
 #include <QNetworkAccessManager>
@@ -106,12 +111,16 @@
 #include "translations/TranslationsModel.h"
 #include "meta/Index.h"
 
-#include <Commandline.h>
 #include <FileSystem.h>
 #include <DesktopServices.h>
 #include <LocalPeer.h>
 
 #include <sys.h>
+
+#ifdef Q_OS_LINUX
+#include <dlfcn.h>
+#include "gamemode_client.h"
+#endif
 
 
 #if defined Q_OS_WIN32
@@ -126,12 +135,6 @@
 #define TOSTRING(x) STRINGIFY(x)
 
 static const QLatin1String liveCheckFile("live.check");
-
-using namespace Commandline;
-
-#define MACOS_HINT "If you are on macOS Sierra, you might have to move the app to your /Applications or ~/Applications folder. "\
-    "This usually fixes the problem and you can move the application elsewhere afterwards.\n"\
-    "\n"
 
 namespace {
 void appDebugOutput(QtMsgType type, const QMessageLogContext &context, const QString &msg)
@@ -233,80 +236,27 @@ Application::Application(int &argc, char **argv) : QApplication(argc, argv)
     this->setQuitOnLastWindowClosed(false);
 
     // Commandline parsing
-    QHash<QString, QVariant> args;
-    {
-        Parser parser(FlagStyle::GNU, ArgumentStyle::SpaceAndEquals);
+    QCommandLineParser parser;
+    parser.setApplicationDescription(BuildConfig.LAUNCHER_NAME);
 
-        // --help
-        parser.addSwitch("help");
-        parser.addShortOpt("help", 'h');
-        parser.addDocumentation("help", "Display this help and exit.");
-        // --version
-        parser.addSwitch("version");
-        parser.addShortOpt("version", 'V');
-        parser.addDocumentation("version", "Display program version and exit.");
-        // --dir
-        parser.addOption("dir");
-        parser.addShortOpt("dir", 'd');
-        parser.addDocumentation("dir", "Use the supplied folder as application root instead of the binary location (use '.' for current)");
-        // --launch
-        parser.addOption("launch");
-        parser.addShortOpt("launch", 'l');
-        parser.addDocumentation("launch", "Launch the specified instance (by instance ID)");
-        // --server
-        parser.addOption("server");
-        parser.addShortOpt("server", 's');
-        parser.addDocumentation("server", "Join the specified server on launch (only valid in combination with --launch)");
-        // --profile
-        parser.addOption("profile");
-        parser.addShortOpt("profile", 'a');
-        parser.addDocumentation("profile", "Use the account specified by its profile name (only valid in combination with --launch)");
-        // --alive
-        parser.addSwitch("alive");
-        parser.addDocumentation("alive", "Write a small '" + liveCheckFile + "' file after the launcher starts");
-        // --import
-        parser.addOption("import");
-        parser.addShortOpt("import", 'I');
-        parser.addDocumentation("import", "Import instance from specified zip (local path or URL)");
+    parser.addOptions({
+        {{"d", "dir"}, "Use a custom path as application root (use '.' for current directory)", "directory"},
+        {{"l", "launch"}, "Launch the specified instance (by instance ID)", "instance"},
+        {{"s", "server"}, "Join the specified server on launch (only valid in combination with --launch)", "address"},
+        {{"a", "profile"}, "Use the account specified by its profile name (only valid in combination with --launch)", "profile"},
+        {"alive", "Write a small '" + liveCheckFile + "' file after the launcher starts"},
+        {{"I", "import"}, "Import instance from specified zip (local path or URL)", "file"}
+    });
+    parser.addHelpOption();
+    parser.addVersionOption();
 
-        // parse the arguments
-        try
-        {
-            args = parser.parse(arguments());
-        }
-        catch (const ParsingError &e)
-        {
-            std::cerr << "CommandLineError: " << e.what() << std::endl;
-            if(argc > 0)
-                std::cerr << "Try '" << argv[0] << " -h' to get help on command line parameters."
-                          << std::endl;
-            m_status = Application::Failed;
-            return;
-        }
+    parser.process(arguments());
 
-        // display help and exit
-        if (args["help"].toBool())
-        {
-            std::cout << qPrintable(parser.compileHelp(arguments()[0]));
-            m_status = Application::Succeeded;
-            return;
-        }
-
-        // display version and exit
-        if (args["version"].toBool())
-        {
-            std::cout << "Version " << BuildConfig.printableVersionString().toStdString() << std::endl;
-            std::cout << "Git " << BuildConfig.GIT_COMMIT.toStdString() << std::endl;
-            m_status = Application::Succeeded;
-            return;
-        }
-    }
-
-    m_instanceIdToLaunch = args["launch"].toString();
-    m_serverToJoin = args["server"].toString();
-    m_profileToUse = args["profile"].toString();
-    m_liveCheck = args["alive"].toBool();
-    m_zipToImport = args["import"].toUrl();
+    m_instanceIdToLaunch = parser.value("launch");
+    m_serverToJoin = parser.value("server");
+    m_profileToUse = parser.value("profile");
+    m_liveCheck = parser.isSet("alive");
+    m_zipToImport = parser.value("import");
 
     // error if --launch is missing with --server or --profile
     if((!m_serverToJoin.isEmpty() || !m_profileToUse.isEmpty()) && m_instanceIdToLaunch.isEmpty())
@@ -337,7 +287,7 @@ Application::Application(int &argc, char **argv) : QApplication(argc, argv)
     QString adjustedBy;
     QString dataPath;
     // change folder
-    QString dirParam = args["dir"].toString();
+    QString dirParam = parser.value("dir");
     if (!dirParam.isEmpty())
     {
         // the dir param. it makes multimc data path point to whatever the user specified
@@ -376,9 +326,6 @@ Application::Application(int &argc, char **argv) : QApplication(argc, argv)
             QString(
                 "The launcher data folder could not be created.\n"
                 "\n"
-#if defined(Q_OS_MAC)
-                MACOS_HINT
-#endif
                 "Make sure you have the right permissions to the launcher data folder and any folder needed to access it.\n"
                 "(%1)\n"
                 "\n"
@@ -394,9 +341,6 @@ Application::Application(int &argc, char **argv) : QApplication(argc, argv)
             QString(
                 "The launcher data folder could not be opened.\n"
                 "\n"
-#if defined(Q_OS_MAC)
-                MACOS_HINT
-#endif
                 "Make sure you have the right permissions to the launcher data folder.\n"
                 "(%1)\n"
                 "\n"
@@ -477,9 +421,6 @@ Application::Application(int &argc, char **argv) : QApplication(argc, argv)
                 QString(
                     "The launcher couldn't create a log file - the data folder is not writable.\n"
                     "\n"
-    #if defined(Q_OS_MAC)
-                    MACOS_HINT
-    #endif
                     "Make sure you have write permissions to the data folder.\n"
                     "(%1)\n"
                     "\n"
@@ -679,6 +620,8 @@ Application::Application(int &argc, char **argv) : QApplication(argc, argv)
         m_settings->registerSetting("NewInstanceGeometry", "");
 
         m_settings->registerSetting("UpdateDialogGeometry", "");
+
+        m_settings->registerSetting("ModDownloadGeometry", "");
 
         // HACK: This code feels so stupid is there a less stupid way of doing this?
         {
@@ -916,10 +859,13 @@ Application::Application(int &argc, char **argv) : QApplication(argc, argv)
         qDebug() << "<> Application theme set.";
     }
 
+    updateCapabilities();
+
     if(createSetupWizard())
     {
         return;
     }
+
     performMainStartupAction();
 }
 
@@ -1028,7 +974,7 @@ void Application::performMainStartupAction()
                 qDebug() << "   Launching with account" << m_profileToUse;
             }
 
-            launch(inst, true, nullptr, serverToJoin, accountToUse);
+            launch(inst, true, false, nullptr, serverToJoin, accountToUse);
             return;
         }
     }
@@ -1132,6 +1078,7 @@ void Application::messageReceived(const QByteArray& message)
         launch(
             instance,
             true,
+            false,
             nullptr,
             serverObject,
             accountObject
@@ -1186,6 +1133,15 @@ void Application::setApplicationTheme(const QString& name, bool initial)
     {
         auto & theme = (*themeIter).second;
         theme->apply(initial);
+#ifdef Q_OS_WIN
+        if (m_mainWindow) {
+            if (QString::compare(theme->id(), "dark") == 0) {
+                    WinDarkmode::setDarkWinTitlebar(m_mainWindow->winId(), true);
+            } else {
+                    WinDarkmode::setDarkWinTitlebar(m_mainWindow->winId(), false);
+            }
+        }
+#endif
     }
     else
     {
@@ -1223,6 +1179,7 @@ bool Application::openJsonEditor(const QString &filename)
 bool Application::launch(
         InstancePtr instance,
         bool online,
+        bool demo,
         BaseProfilerFactory *profiler,
         MinecraftServerTargetPtr serverToJoin,
         MinecraftAccountPtr accountToUse
@@ -1246,6 +1203,7 @@ bool Application::launch(
         controller.reset(new LaunchController());
         controller->setInstance(instance);
         controller->setOnline(online);
+        controller->setDemo(demo);
         controller->setProfiler(profiler);
         controller->setServerToJoin(serverToJoin);
         controller->setAccountToUse(accountToUse);
@@ -1416,6 +1374,13 @@ MainWindow* Application::showMainWindow(bool minimized)
         m_mainWindow = new MainWindow();
         m_mainWindow->restoreState(QByteArray::fromBase64(APPLICATION->settings()->get("MainWindowState").toByteArray()));
         m_mainWindow->restoreGeometry(QByteArray::fromBase64(APPLICATION->settings()->get("MainWindowGeometry").toByteArray()));
+#ifdef Q_OS_WIN
+        if (QString::compare(settings()->get("ApplicationTheme").toString(), "dark") == 0) {
+            WinDarkmode::setDarkWinTitlebar(m_mainWindow->winId(), true);
+        } else {
+            WinDarkmode::setDarkWinTitlebar(m_mainWindow->winId(), false);
+        }
+#endif
         if(minimized)
         {
             m_mainWindow->showMinimized();
@@ -1568,14 +1533,30 @@ shared_qobject_ptr<Meta::Index> Application::metadataIndex()
     return m_metadataIndex;
 }
 
-Application::Capabilities Application::currentCapabilities()
+void Application::updateCapabilities()
 {
-    Capabilities c;
+    m_capabilities = None;
     if (!getMSAClientID().isEmpty())
-        c |= SupportsMSA;
+        m_capabilities |= SupportsMSA;
     if (!getFlameAPIKey().isEmpty())
-        c |= SupportsFlame;
-    return c;
+        m_capabilities |= SupportsFlame;
+
+#ifdef Q_OS_LINUX
+    if (gamemode_query_status() >= 0)
+        m_capabilities |= SupportsGameMode;
+
+    {
+        void *dummy = dlopen("libMangoHud_dlsym.so", RTLD_LAZY);
+        // try normal variant as well
+        if (dummy == NULL)
+            dummy = dlopen("libMangoHud.so", RTLD_LAZY);
+
+        if (dummy != NULL) {
+            dlclose(dummy);
+            m_capabilities |= SupportsMangoHud;
+        }
+    }
+#endif
 }
 
 QString Application::getJarPath(QString jarFile)

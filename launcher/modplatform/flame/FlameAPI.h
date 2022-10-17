@@ -7,10 +7,12 @@ class FlameAPI : public NetworkModAPI {
    public:
     auto matchFingerprints(const QList<uint>& fingerprints, QByteArray* response) -> NetJob::Ptr;
     auto getModFileChangelog(int modId, int fileId) -> QString;
+    auto getModDescription(int modId) -> QString;
 
     auto getLatestVersion(VersionSearchArgs&& args) -> ModPlatform::IndexedVersion;
 
     auto getProjects(QStringList addonIds, QByteArray* response) const -> NetJob* override;
+    auto getFiles(const QStringList& fileIds, QByteArray* response) const -> NetJob*;
 
    private:
     inline auto getSortFieldInt(QString sortString) const -> int
